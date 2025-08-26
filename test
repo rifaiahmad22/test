@@ -1,0 +1,199 @@
+import pandas as pd
+import streamlit as st
+import plotly.express as px
+from datetime import datetime
+import calendar
+
+# --- PENGATURAN TAMPILAN APLIKASI ---
+st.set_page_config(
+    page_title="Sales Dashboard",
+    page_icon="🚀",
+    layout="wide"
+)
+
+# --- FUNGSI UNTUK MEMUAT DATA ---
+@st.cache_data
+def load_data(file_path):
+    try:
+        df = pd.read_excel(file_path, engine='openpyxl')
+        df['order_date'] = pd.to_datetime(df['order_date'], errors='coerce')
+        df.dropna(subset=['order_date'], inplace=True)
+        # Pastikan kolom email ada dan bertipe string
+        if 'customer_email' in df.columns:
+            df['customer_email'] = df['customer_email'].astype(str)
+        return df
+    except FileNotFoundError:
+        st.error(f"GAGAL: File '{file_path}' tidak ditemukan.")
+        return None
+    except Exception as e:
+        st.error(f"Terjadi error saat memuat data: {e}")
+        return None
+
+# --- SIDEBAR: TOMBOL UNGGAH FILE ---
+st.sidebar.header('📂 Unggah File Anda')
+uploaded_file = st.sidebar.file_uploader("Pilih file Excel (.xlsx)", type=["xlsx"])
+
+if uploaded_file is None:
+    st.info("Silakan unggah file Excel untuk memulai.")
+    st.stop()
+
+# --- MEMUAT DATA DARI FILE YANG DIUNGGAH ---
+df = load_data(uploaded_file)
+
+if df is None or df.empty:
+    st.warning("Data tidak berhasil dimuat atau kosong.")
+    st.stop()
+
+# --- FILTER AWAL ---
+EXCLUDE_CATEGORIES = ['PERDANA', 'OTHER']
+if 'category 1' in df.columns:
+    df = df[~df['category 1'].str.upper().isin(EXCLUDE_CATEGORIES)]
+
+# --- NAMA KOLOM UTAMA ---
+KOLOM_PENJUALAN = 'sales without tax'
+if KOLOM_PENJUALAN not in df.columns:
+    st.error(f"GAGAL: Kolom '{KOLOM_PENJUALAN}' tidak ditemukan di file Anda.")
+    st.stop()
+
+# --- SIDEBAR FILTER ---
+st.sidebar.header('⚙️ Filter Data')
+
+years = sorted(df['Years'].unique())
+year_selected = st.sidebar.selectbox('Pilih Tahun', ["Semua"] + years)
+filtered_by_year = df if year_selected == "Semua" else df[df['Years'] == year_selected]
+
+month_map = {
+    'Januari': 1, 'Februari': 2, 'Maret': 3, 'April': 4, 'Mei': 5, 'Juni': 6,
+    'Juli': 7, 'Agustus': 8, 'September': 9, 'Oktober': 10, 'November': 11, 'Desember': 12
+}
+month_order_in_data = sorted(filtered_by_year['Month 1'].unique(), key=lambda m: month_map.get(m, 0))
+month_selected = st.sidebar.selectbox('Pilih Bulan', ["Semua"] + month_order_in_data)
+filtered_by_month = filtered_by_year if month_selected == "Semua" else filtered_by_year[filtered_by_year['Month 1'] == month_selected]
+
+sites = sorted(filtered_by_month['site_code'].unique())
+site_selected = st.sidebar.selectbox('Pilih Site Code', ["Semua"] + sites)
+filtered_by_site = filtered_by_month if site_selected == "Semua" else filtered_by_month[filtered_by_month['site_code'] == site_selected]
+
+st.sidebar.markdown("---")
+
+sales_name = st.sidebar.multiselect('Pilih Sales Name', sorted(filtered_by_site['sales_name'].unique()))
+
+# --- PROSES FILTER DATA LANJUTAN ---
+filtered_df = filtered_by_site.copy()
+if sales_name: filtered_df = filtered_df[filtered_df['sales_name'].isin(sales_name)]
+
+
+# --- TAMPILAN UTAMA DASBOR ---
+st.title("📊 Sales Dashboard")
+st.markdown("---")
+
+# Menghitung Metrik KPI
+total_sales_actual = int(filtered_df[KOLOM_PENJUALAN].sum())
+total_quantity = int(filtered_df['quantity'].sum())
+
+# --- PERHITUNGAN ESTIMASI ---
+estimation = 0
+today = datetime.now()
+current_day = today.day
+current_month_num = today.month
+current_year = today.year
+days_in_month = calendar.monthrange(current_year, current_month_num)[1]
+
+if month_selected != "Semua" and year_selected != "Semua":
+    selected_month_num = month_map.get(month_selected)
+    if selected_month_num == current_month_num and year_selected == current_year:
+        if total_sales_actual > 0 and current_day > 0:
+            estimation = (total_sales_actual / current_day) * days_in_month
+
+# --- PERHITUNGAN EMAIL WALK-IN ---
+walkin_count = 0
+if 'customer_email' in filtered_df.columns and 'pos_number' in filtered_df.columns:
+    walkin_email_address = 'walkin@erajaya.com'
+    walkin_df = filtered_df[filtered_df['customer_email'].str.lower() == walkin_email_address]
+    walkin_count = walkin_df['pos_number'].nunique()
+
+# Menampilkan KPI
+col1, col2, col3, col4 = st.columns(4)
+with col1:
+    st.metric("Total Sales", f"{total_sales_actual:,.0f}")
+with col2:
+    st.metric("Estimasi Sales (Bulan Ini)", f"{estimation:,.0f}")
+with col3:
+    st.metric("Total Quantity", f"{total_quantity:,}")
+with col4:
+    st.metric("Customer Walk-in", f"{walkin_count}")
+
+
+st.markdown("---")
+
+# --- Visualisasi Tren Penjualan ---
+st.header("📈 Pergerakan Penjualan")
+chart_type = st.radio(
+    "Pilih Tampilan Tren",
+    ["Daily", "Weekly", "Monthly"],
+    horizontal=True,
+    key='chart_selector'
+)
+
+if chart_type == "Daily":
+    daily_sales_data = filtered_by_month if site_selected == "Semua" else filtered_by_month[filtered_by_month['site_code'] == site_selected]
+    daily_sales = daily_sales_data.groupby('Day')[KOLOM_PENJUALAN].sum().reset_index()
+    daily_sales = daily_sales.sort_values('Day')
+    fig = px.line(daily_sales, x='Day', y=KOLOM_PENJUALAN, text=KOLOM_PENJUALAN)
+    fig.update_xaxes(type='category')
+    fig.update_traces(texttemplate='%{text:,.0f}', textposition='top center')
+    st.plotly_chart(fig, use_container_width=True)
+
+elif chart_type == "Weekly":
+    weekly_sales_data = filtered_by_month if site_selected == "Semua" else filtered_by_month[filtered_by_month['site_code'] == site_selected]
+    weekly_sales = weekly_sales_data.groupby('Week')[KOLOM_PENJUALAN].sum().reset_index()
+    weekly_sales['week_num'] = weekly_sales['Week'].str.extract('(\d+)').astype(int)
+    weekly_sales = weekly_sales.sort_values('week_num')
+    fig = px.line(weekly_sales, x='Week', y=KOLOM_PENJUALAN, text=KOLOM_PENJUALAN)
+    fig.update_traces(texttemplate='%{text:,.0f}', textposition='top center')
+    st.plotly_chart(fig, use_container_width=True)
+
+elif chart_type == "Monthly":
+    monthly_sales_data = filtered_by_year if site_selected == "Semua" else filtered_by_year[filtered_by_year['site_code'] == site_selected]
+    monthly_sales = monthly_sales_data.groupby('Month 1')[KOLOM_PENJUALAN].sum().reset_index()
+    month_order = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember']
+    monthly_sales['Month 1'] = pd.Categorical(monthly_sales['Month 1'], categories=month_order, ordered=True)
+    monthly_sales = monthly_sales.sort_values('Month 1')
+    fig = px.line(monthly_sales, x='Month 1', y=KOLOM_PENJUALAN, text=KOLOM_PENJUALAN)
+    fig.update_traces(texttemplate='%{text:,.0f}', textposition='top center')
+    st.plotly_chart(fig, use_container_width=True)
+
+st.markdown("---")
+
+# --- Tabel Data Berdasarkan Kategori ---
+st.header("📦 Total Penjualan per Kategori")
+
+def format_table(df_grouped):
+    return df_grouped.style.format({KOLOM_PENJUALAN: "{:,.0f}"}).hide(axis="index")
+
+row1_col1, row1_col2 = st.columns(2)
+row2_col1, row2_col2 = st.columns(2)
+
+with row1_col1:
+    st.subheader("Kategori 1")
+    if 'category 1' in filtered_df.columns:
+        df_cat1 = filtered_df.groupby('category 1')[KOLOM_PENJUALAN].sum().reset_index()
+        st.dataframe(format_table(df_cat1), use_container_width=True)
+
+with row1_col2:
+    st.subheader("Kategori 2")
+    if 'category 2' in filtered_df.columns:
+        df_cat2 = filtered_df.groupby('category 2')[KOLOM_PENJUALAN].sum().reset_index()
+        st.dataframe(format_table(df_cat2), use_container_width=True)
+
+with row2_col1:
+    st.subheader("Kategori 3")
+    if 'category 3' in filtered_df.columns:
+        df_cat3 = filtered_df.groupby('category 3')[KOLOM_PENJUALAN].sum().reset_index()
+        st.dataframe(format_table(df_cat3), use_container_width=True)
+
+with row2_col2:
+    st.subheader("Kategori 4")
+    if 'category 4' in filtered_df.columns:
+        df_cat4 = filtered_df.groupby('category 4')[KOLOM_PENJUALAN].sum().reset_index()
+        st.dataframe(format_table(df_cat4), use_container_width=True)
